@@ -21,6 +21,8 @@ class Mesh[T <: Data : Arithmetic](inputType: T, outputType: T, accType: T,
                                    val meshRows: Int, val meshColumns: Int) extends Module {
   val io = IO(new Bundle {
     val in_a = Input(Vec(meshRows, Vec(tileRows, inputType)))
+    val in_depthwise_accum = Input(Vec(meshRows, Vec(tileRows, inputType)))
+    val out_depthwise_accum = Output(Vec(meshRows, Vec(tileRows, outputType)))
     val in_b = Input(Vec(meshColumns, Vec(tileColumns, inputType)))
     val in_d = Input(Vec(meshColumns, Vec(tileColumns, inputType)))
     val in_control = Input(Vec(meshColumns, Vec(tileColumns, new PEControl(accType))))
@@ -55,11 +57,19 @@ class Mesh[T <: Data : Arithmetic](inputType: T, outputType: T, accType: T,
     }
   }
 
+  for (r <- 0 until meshRows) {
+    mesh(r).reverse.foldLeft(io.in_depthwise_accum(r)) {
+      case (in_depthwise_accum, tile) =>
+        tile.io.in_depthwise_accum := in_depthwise_accum
+        tile.io.out_depthwise_accum
+    }
+  }
+
   // Chain tile_out_b -> tile_b_in (pipeline b across each column)
   for (c <- 0 until meshColumns) {
     meshT(c).foldLeft((io.in_b(c), io.in_valid(c))) {
       case ((in_b, valid), tile) =>
-        tile.io.in_b := pipe(valid.head, in_b, tile_latency+1)
+        tile.io.in_b := pipe(valid.head, in_b, tile_latency)
         (tile.io.out_b, tile.io.out_valid)
     }
   }
@@ -82,6 +92,7 @@ class Mesh[T <: Data : Arithmetic](inputType: T, outputType: T, accType: T,
           tile_ctrl.shift := pipe(v, ctrl.shift, tile_latency+1)
           tile_ctrl.dataflow := pipe(v, ctrl.dataflow, tile_latency+1)
           tile_ctrl.propagate := pipe(v, ctrl.propagate, tile_latency+1)
+          tile_ctrl.dwconv_depthwise := pipe(v, ctrl.dwconv_depthwise, tile_latency+1)
         }
         (tile.io.out_control, tile.io.out_valid)
     }
@@ -125,5 +136,9 @@ class Mesh[T <: Data : Arithmetic](inputType: T, outputType: T, accType: T,
     ctrl := ShiftRegister(tile.io.out_control, output_delay)
     id := ShiftRegister(tile.io.out_id, output_delay)
     last := ShiftRegister(tile.io.out_last, output_delay)
+  }
+
+  for(r <- 0 until meshRows){
+    io.out_depthwise_accum(r) := ShiftRegister(mesh(r)(0).io.out_depthwise_accum, output_delay)
   }
 }

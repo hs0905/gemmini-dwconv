@@ -35,8 +35,12 @@ class Tile[T <: Data](inputType: T, outputType: T, accType: T, df: Dataflow.Valu
     val out_valid = Output(Vec(columns, Bool()))
 
     val bad_dataflow = Output(Bool())
+    val in_depthwise_accum = Input(Vec(rows,outputType))
+    val out_depthwise_accum = Output(Vec(rows,outputType))
   })
 
+  dontTouch(io.in_depthwise_accum)
+  dontTouch(io.out_depthwise_accum)
   import ev._
 
   val tile = Seq.fill(rows, columns)(Module(new PE(inputType, outputType, accType, df, max_simultaneous_matmuls)))
@@ -49,6 +53,14 @@ class Tile[T <: Data](inputType: T, outputType: T, accType: T, df: Dataflow.Valu
       case (in_a, pe) =>
         pe.io.in_a := in_a
         pe.io.out_a
+    }
+  }
+
+  for (r <- 0 until rows) {
+    tile(r).reverse.foldLeft(io.in_depthwise_accum(r)) {
+      case (in_depthwise_accum, pe) =>
+        pe.io.in_depthwise_accum := in_depthwise_accum
+        pe.io.out_depthwise_accum
     }
   }
 
@@ -128,5 +140,6 @@ class Tile[T <: Data](inputType: T, outputType: T, accType: T, df: Dataflow.Valu
   // Drive the Tile's right IO
   for (r <- 0 until rows) {
     io.out_a(r) := tile(r)(columns-1).io.out_a
+    io.out_depthwise_accum(r) := tile(r)(0).io.out_depthwise_accum
   }
 }

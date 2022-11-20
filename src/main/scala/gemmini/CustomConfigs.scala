@@ -13,11 +13,17 @@ object GemminiCustomConfigs {
   val defaultFpConfig = GemminiFPConfigs.defaultFPConfig
 
   // Create your own configs here
-  val baselineInferenceConfig = defaultConfig.copy(
+  val baselineInferenceConfig_dwconv = defaultConfig.copy(
+    dataflow = Dataflow.WS,
+    sp_singleported = false,
+
     has_training_convs = false,
   )
 
-  val highPerfInferenceConfig = defaultConfig.copy(
+  val highPerfInferenceConfig_dwconv = defaultConfig.copy(
+    dataflow = Dataflow.WS,
+    sp_singleported = false,
+
     meshRows = 32,
     meshColumns = 32,
 
@@ -42,7 +48,7 @@ object GemminiCustomConfigs {
   )
 
   // Specify which of your custom configs you want to build here
-  val customConfig = baselineInferenceConfig
+  val customConfig = baselineInferenceConfig_dwconv
 }
 
 
