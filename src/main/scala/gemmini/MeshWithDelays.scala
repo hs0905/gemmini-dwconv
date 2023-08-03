@@ -10,7 +10,7 @@ class MeshWithDelaysReq[T <: Data: Arithmetic, TagT <: TagQueueTag with Data](ac
   val pe_control = new PEControl(accType)
   val a_transpose = Bool()
   val bd_transpose = Bool()
-  val total_rows = UInt(log2Up(block_size+1).W)
+  val total_rows = UInt(11.W)
   val tag = tagType
   val flush = UInt(2.W) // TODO magic number
 
@@ -18,7 +18,7 @@ class MeshWithDelaysReq[T <: Data: Arithmetic, TagT <: TagQueueTag with Data](ac
 
 class MeshWithDelaysResp[T <: Data: Arithmetic, TagT <: TagQueueTag with Data](outType: T, meshCols: Int, tileCols: Int, block_size: Int, tagType: TagT) extends Bundle {
   val data = Vec(meshCols, Vec(tileCols, outType))
-  val total_rows = UInt(log2Up(block_size+1).W)
+  val total_rows = UInt(11.W)
   val tag = tagType
   val last = Bool()
 
@@ -37,6 +37,7 @@ class MeshWithDelays[T <: Data: Arithmetic, U <: TagQueueTag with Data]
   extends Module {
 
   val A_TYPE = Vec(meshRows, Vec(tileRows, inputType))
+  val M_TYPE = Vec(meshRows, Vec(tileRows, accType))
   val B_TYPE = Vec(meshColumns, Vec(tileColumns, inputType))
   val C_TYPE = Vec(meshColumns, Vec(tileColumns, outputType))
   val D_TYPE = Vec(meshColumns, Vec(tileColumns, inputType))
@@ -57,6 +58,8 @@ class MeshWithDelays[T <: Data: Arithmetic, U <: TagQueueTag with Data]
 
   val io = IO(new Bundle {
     val a = Flipped(Decoupled(A_TYPE))
+    val depthwise_accum = Flipped(Decoupled(M_TYPE))
+    val is_dwconv_depthwise = Input(Bool())
     val b = Flipped(Decoupled(B_TYPE))
     val d = Flipped(Decoupled(D_TYPE))
 
@@ -95,9 +98,10 @@ class MeshWithDelays[T <: Data: Arithmetic, U <: TagQueueTag with Data]
   val matmul_id = RegInit(0.U(log2Up(max_simultaneous_matmuls).W))
 
   val total_fires = req.bits.total_rows
-  val fire_counter = RegInit(0.U(log2Up(block_size).W))
+  val fire_counter = RegInit(0.U(11.W))
 
   val a_buf = RegEnable(io.a.bits, io.a.fire)
+  val depthwise_accum_buf = RegEnable(io.depthwise_accum.bits, io.depthwise_accum.fire)
   val b_buf = RegEnable(io.b.bits, io.b.fire)
   val d_buf = RegEnable(io.d.bits, io.d.fire)
 
@@ -141,6 +145,7 @@ class MeshWithDelays[T <: Data: Arithmetic, U <: TagQueueTag with Data]
   }
 
   io.a.ready := !a_written || input_next_row_into_spatial_array || io.req.ready
+  io.depthwise_accum.ready := !a_written || input_next_row_into_spatial_array || io.req.ready
   io.b.ready := !b_written || input_next_row_into_spatial_array || io.req.ready
   io.d.ready := !d_written || input_next_row_into_spatial_array || io.req.ready
 
@@ -171,14 +176,17 @@ class MeshWithDelays[T <: Data: Arithmetic, U <: TagQueueTag with Data]
   val b_shifter_in = WireInit(Mux(b_is_from_transposer, transposer_out.asTypeOf(B_TYPE), b_buf))
   val d_shifter_in = WireInit(Mux(d_is_from_transposer,
     VecInit(transposer_out.flatten.reverse.grouped(tileRows).map(VecInit(_)).toSeq).asTypeOf(D_TYPE), d_buf))
+  val depthwise_accum_shifter_in = WireInit(depthwise_accum_buf)
 
   mesh.io.in_a := shifted(a_shifter_in, leftBanks)
+  mesh.io.in_depthwise_accum := shifted(depthwise_accum_shifter_in, leftBanks)
   mesh.io.in_b := shifted(b_shifter_in, upBanks)
   mesh.io.in_d := shifted(d_shifter_in, upBanks)
 
   mesh.io.in_control.zipWithIndex.foreach { case (ss, i) =>
     ss.foreach(_.dataflow := ShiftRegister(req.bits.pe_control.dataflow, i * (tile_latency + 1)))
     ss.foreach(_.propagate := ShiftRegister(in_prop, i * (tile_latency + 1)))
+    ss.foreach(_.dwconv_depthwise := ShiftRegister(req.bits.pe_control.dwconv_depthwise, i * (tile_latency + 1)))
   }
   val result_shift = RegNext(req.bits.pe_control.shift) // TODO will this arrive at the right time if memory isn't pipelined?
   mesh.io.in_control.zipWithIndex.foreach { case (ctrl, i) =>
@@ -196,8 +204,8 @@ class MeshWithDelays[T <: Data: Arithmetic, U <: TagQueueTag with Data]
 
   // We want to output C when we're output-stationary, but B when we're weight-stationary
   // TODO these would actually overlap when we switch from output-stationary to weight-stationary
-  io.resp.bits.data := shifted(Mux(mesh.io.out_control(0)(0).dataflow === Dataflow.OS.id.U, mesh.io.out_c, mesh.io.out_b), outBanks, true)
-
+  io.resp.bits.data := shifted(Mux(mesh.io.out_control(0)(0).dataflow === Dataflow.OS.id.U, mesh.io.out_c, 
+                                                                                            Mux(io.is_dwconv_depthwise, mesh.io.out_depthwise_accum, mesh.io.out_b)), outBanks, true)
   io.resp.valid := shifted(mesh.io.out_valid, outBanks, reverse = true)(0)(0)
 
   val out_last = shifted(mesh.io.out_last, outBanks, reverse = true)(0)(0)
@@ -207,7 +215,7 @@ class MeshWithDelays[T <: Data: Arithmetic, U <: TagQueueTag with Data]
   class TagWithIdAndTotalRows extends Bundle with TagQueueTag {
     val tag = tagType.cloneType
     val id = UInt(log2Up(max_simultaneous_matmuls).W)
-    val total_rows = UInt(log2Up(block_size+1).W)
+    val total_rows = UInt(11.W)
 
     override def make_this_garbage(dummy: Int=0): Unit = {
       total_rows := block_size.U

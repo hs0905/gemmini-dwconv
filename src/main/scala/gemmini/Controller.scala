@@ -19,6 +19,7 @@ class GemminiCmd(rob_entries: Int)(implicit p: Parameters) extends Bundle {
   val rob_id = UDValid(UInt(log2Up(rob_entries).W))
   val from_matmul_fsm = Bool()
   val from_conv_fsm = Bool()
+  val from_conv_dw_fsm = Bool()
 }
 
 class Gemmini[T <: Data : Arithmetic, U <: Data, V <: Data](val config: GemminiArrayConfig[T, U, V])
@@ -135,6 +136,7 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
   raw_cmd_q.io.enq.bits.rob_id := DontCare
   raw_cmd_q.io.enq.bits.from_conv_fsm := false.B
   raw_cmd_q.io.enq.bits.from_matmul_fsm := false.B
+  raw_cmd_q.io.enq.bits.from_conv_dw_fsm := false.B
 
   val raw_cmd = raw_cmd_q.io.deq
 
@@ -152,12 +154,22 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
     new ComputeRs(mvin_rows_bits, mvin_cols_bits, local_addr_t), new ComputeRs(mvin_rows_bits, mvin_cols_bits, local_addr_t),
     has_training_convs, has_max_pool, has_first_layer_optimizations) }
 
-  val (loop_cmd, loop_matmul_unroller_busy) = withClock (gated_clock) { LoopMatmul(conv_cmd, reservation_station.io.matmul_ld_completed, reservation_station.io.matmul_st_completed, reservation_station.io.matmul_ex_completed,
+  val (matmul_cmd, loop_matmul_unroller_busy) = withClock (gated_clock) { LoopMatmul(conv_cmd, reservation_station.io.matmul_ld_completed, reservation_station.io.matmul_st_completed, reservation_station.io.matmul_ex_completed,
     meshRows*tileRows, coreMaxAddrBits, reservation_station_entries, max_lds, max_exs, max_sts, sp_banks * sp_bank_entries, acc_banks * acc_bank_entries,
     inputType.getWidth, accType.getWidth, dma_maxbytes, new MvinRs2(mvin_rows_bits, mvin_cols_bits, local_addr_t),
     new PreloadRs(mvin_rows_bits, mvin_cols_bits, local_addr_t), new PreloadRs(mvout_rows_bits, mvout_cols_bits, local_addr_t),
     new ComputeRs(mvin_rows_bits, mvin_cols_bits, local_addr_t), new ComputeRs(mvin_rows_bits, mvin_cols_bits, local_addr_t),
     new MvoutRs2(mvout_rows_bits, mvout_cols_bits, local_addr_t)) }
+
+  val (loop_cmd, loop_conv_dw_unroller_busy) = withClock (gated_clock) { LoopConvDW(matmul_cmd, reservation_station.io.conv_dw_ld_completed, reservation_station.io.conv_dw_st_completed, reservation_station.io.conv_dw_ex_completed,
+    meshRows*tileRows, coreMaxAddrBits, reservation_station_entries, max_lds, max_exs, max_sts, sp_banks * sp_bank_entries, acc_banks * acc_bank_entries,
+    inputType.getWidth, accType.getWidth, dma_maxbytes,
+    new ConfigMvinRs1(mvin_scale_t_bits, block_stride_bits, pixel_repeats_bits), new MvinRs2(mvin_rows_bits, mvin_cols_bits, local_addr_t),
+    new ConfigMvoutRs2(acc_scale_t_bits, 32), new MvoutRs2(mvout_rows_bits, mvout_cols_bits, local_addr_t),
+    new ConfigExRs1(acc_scale_t_bits),
+    new PreloadRs(mvin_rows_bits, mvin_cols_bits, local_addr_t), new PreloadRs(mvout_rows_bits, mvout_cols_bits, local_addr_t),
+    new ComputeRs(mvin_rows_bits, mvin_cols_bits, local_addr_t), new ComputeRs(mvin_rows_bits, mvin_cols_bits, local_addr_t),
+    ) }
 
   val unrolled_cmd = Queue(loop_cmd)
   unrolled_cmd.ready := false.B
@@ -327,7 +339,7 @@ class GemminiModule[T <: Data: Arithmetic, U <: Data, V <: Data]
   reservation_station_completed_arb.io.out.ready := true.B
 
   // Wire up global RoCC signals
-  io.busy := raw_cmd.valid || loop_conv_unroller_busy || loop_matmul_unroller_busy || reservation_station.io.busy || spad.module.io.busy || unrolled_cmd.valid || loop_cmd.valid || conv_cmd.valid
+  io.busy := raw_cmd.valid || loop_conv_unroller_busy || loop_matmul_unroller_busy || loop_conv_dw_unroller_busy  || reservation_station.io.busy || spad.module.io.busy || unrolled_cmd.valid || loop_cmd.valid || matmul_cmd.valid || conv_cmd.valid
 
   io.interrupt := tlb.io.exp.map(_.interrupt).reduce(_ || _)
 

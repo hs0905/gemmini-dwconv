@@ -3,10 +3,12 @@ package gemmini
 
 import chisel3._
 import chisel3.util._
+import Util._
 
 class PEControl[T <: Data : Arithmetic](accType: T) extends Bundle {
   val dataflow = UInt(1.W) // TODO make this an Enum
   val propagate = UInt(1.W) // Which register should be propagated (and which should be accumulated)?
+  val dwconv_depthwise = Bool()
   val shift = UInt(log2Up(accType.getWidth).W) // TODO this isn't correct for Floats
 
 }
@@ -41,6 +43,9 @@ class PE[T <: Data](inputType: T, outputType: T, accType: T, df: Dataflow.Value,
     val out_valid = Output(Bool())
 
     val bad_dataflow = Output(Bool())
+
+    val in_depthwise_accum = Input(outputType)
+    val out_depthwise_accum = Output(outputType)
   })
 
   val cType = if (df == Dataflow.WS) inputType else accType
@@ -50,9 +55,11 @@ class PE[T <: Data](inputType: T, outputType: T, accType: T, df: Dataflow.Value,
   val d  = io.in_d
   val c1 = Reg(cType)
   val c2 = Reg(cType)
+  val accum = Reg(outputType)
   val dataflow = io.in_control.dataflow
   val prop  = io.in_control.propagate
   val shift = io.in_control.shift
+  val dwconv_depthwise = io.in_control.dwconv_depthwise
   val id = io.in_id
   val last = io.in_last
   val valid = io.in_valid
@@ -61,6 +68,7 @@ class PE[T <: Data](inputType: T, outputType: T, accType: T, df: Dataflow.Value,
   io.out_control.dataflow := dataflow
   io.out_control.propagate := prop
   io.out_control.shift := shift
+  io.out_control.dwconv_depthwise := dwconv_depthwise
   io.out_id := id
   io.out_last := last
   io.out_valid := valid
@@ -78,6 +86,15 @@ class PE[T <: Data](inputType: T, outputType: T, accType: T, df: Dataflow.Value,
   val PROPAGATE = 1.U(1.W)
 
   io.bad_dataflow := false.B
+  io.out_depthwise_accum := 0.S
+
+  when(dwconv_depthwise){
+    accum := io.in_depthwise_accum
+  }.otherwise {
+    accum := b
+  }
+
+
   when ((df == Dataflow.OS).B || ((df == Dataflow.BOTH).B && dataflow === OUTPUT_STATIONARY)) {
     when(prop === PROPAGATE) {
       io.out_c := (c1 >> shift_offset).clippedToWidthOf(outputType)
@@ -93,18 +110,21 @@ class PE[T <: Data](inputType: T, outputType: T, accType: T, df: Dataflow.Value,
   }.elsewhen ((df == Dataflow.WS).B || ((df == Dataflow.BOTH).B && dataflow === WEIGHT_STATIONARY)) {
     when(prop === PROPAGATE) {
       io.out_c := c1
-      io.out_b := b.mac(a, c2.asTypeOf(inputType))
+      io.out_b := accum.mac(a, c2.asTypeOf(inputType))
       c1 := d
+      io.out_depthwise_accum := io.out_b  //accum.mac(io.in_a,(c2.asTypeOf(inputType)))
     }.otherwise {
       io.out_c := c2
-      io.out_b := b.mac(a, c1.asTypeOf(inputType))
+      io.out_b := accum.mac(a, c1.asTypeOf(inputType))
       c2 := d
+      io.out_depthwise_accum := io.out_b //accum.mac(io.in_a,(c1.asTypeOf(inputType)))
     }
   }.otherwise {
     io.bad_dataflow := true.B
     //assert(false.B, "unknown dataflow")
     io.out_c := DontCare
     io.out_b := DontCare
+    io.out_depthwise_accum := DontCare
   }
 
   when (!valid) {

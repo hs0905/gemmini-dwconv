@@ -32,6 +32,14 @@ object GemminiISA {
   val LOOP_CONV_WS_CONFIG_5 = 20.U // *weights | *output
   val LOOP_CONV_WS_CONFIG_6 = 21.U // *bias, *input
 
+  val LOOP_DW_CONV_WS = 29.U
+  val LOOP_DW_CONV_WS_CONFIG_1 = 23.U
+  val LOOP_DW_CONV_WS_CONFIG_2 = 24.U
+  val LOOP_DW_CONV_WS_CONFIG_3 = 25.U
+  val LOOP_DW_CONV_WS_CONFIG_4 = 26.U
+  val LOOP_DW_CONV_WS_CONFIG_5 = 27.U
+  val LOOP_DW_CONV_WS_CONFIG_6 = 28.U
+
   val CLKGATE_EN = 22.U
 
   // rs1[2:0] values
@@ -178,6 +186,25 @@ object GemminiISA {
     val c_stride = UInt(CONFIG_EX_RS2_C_STRIDE_WIDTH.W)
     val relu6_shift = UInt(CONFIG_EX_RS2_RELU6_SHIFT_WIDTH.W)
     val in_shift = UInt(CONFIG_EX_RS2_IN_SHIFT_WIDTH.W)
+  }
+
+  class ConfigDWConvRs1 extends Bundle {
+    val _spacer1 = UInt(5.W)     //63-59
+    val ocols = UInt(9.W)         //58-50
+    val orows = UInt(9.W)         //49-41
+    val icols = UInt(9.W)         //40-32
+    val irows = UInt(9.W)         //31-23
+    val atomic_orows = UInt(8.W)  //22-15
+    val _spacer2 = UInt(3.W)     //14-12
+    val ch_blk_num = UInt(9.W)  //11-3
+    val is_dwconv_depthwise = UInt(1.W) //2
+    val cmd_type = UInt(CONFIG_EX_RS1_CMD_TYPE_WIDTH.W) //1-0
+  }
+  class ConfigDWConvRs2 extends Bundle {
+    val _spacer1 = UInt(42.W)      //63-22
+    val dw_atomic_orows_phase_total = UInt(8.W)  //21-14
+    val frame_height = UInt(6.W) //13-8
+    val frame_size = UInt(8.W) //7-0
   }
 
   val PRELOAD_RS_ADDR_WIDTH = 32

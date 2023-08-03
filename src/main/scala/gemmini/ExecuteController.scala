@@ -52,8 +52,8 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
   val mesh_tag = new Bundle with TagQueueTag {
     val rob_id = UDValid(UInt(log2Up(reservation_station_entries).W))
     val addr = local_addr_t.cloneType
-    val rows = UInt(log2Up(block_size + 1).W)
-    val cols = UInt(log2Up(block_size + 1).W)
+    val rows = UInt(11.W)
+    val cols = UInt(11.W)
 
     override def make_this_garbage(dummy: Int = 0): Unit = {
       rob_id.valid := false.B
@@ -104,6 +104,22 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
   val kdim2 = RegInit(0.U(8.W))
   val weight_double_bank = RegInit(false.B)
   val weight_triple_bank = RegInit(false.B)
+  
+  val is_dwconv_depthwise = RegInit(false.B)
+  val dw_ocols = RegInit(0.U(9.W))
+  val dw_orows = RegInit(0.U(9.W))
+  val dw_icols = RegInit(0.U(9.W))
+  val dw_irows = RegInit(0.U(9.W))
+  val dw_atomic_orows = RegInit(0.U(8.W))
+  val dw_atomic_orows_phase_total = RegInit(0.U(8.W))
+  val dw_ch_blk_num = RegInit(0.U(9.W))
+  val dw_frame_height = RegInit(0.U(6.W))
+  val dw_frame_size = RegInit(0.U(8.W))
+  val dw_latency = RegInit(0.U(block_size.W))
+
+  val dw_input_phase_offset = RegInit(0.U(18.W))
+  val dw_output_phase_offset = RegInit(0.U(18.W))
+
 
   val icol = WireInit(0.U(9.W))
   val irow = WireInit(0.U(9.W))
@@ -152,8 +168,8 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
   val accumulate_zeros = b_address_rs2.is_garbage()
   val preload_zeros = d_address_rs1.is_garbage()
 
-  val a_cols_default = rs1s(a_address_place)(32 + log2Up(block_size + 1) - 1, 32) // TODO magic numbers
-  val a_rows_default = rs1s(a_address_place)(48 + log2Up(block_size + 1) - 1, 48) // TODO magic numbers
+  val a_cols_default = rs1s(a_address_place)(32 + 11 - 1, 32) // TODO magic numbers
+  val a_rows_default = rs1s(a_address_place)(48 + 11 - 1, 48) // TODO magic numbers
   val b_cols_default = rs2s(b_address_place)(32 + log2Up(block_size + 1) - 1, 32) // TODO magic numbers
   val b_rows_default = rs2s(b_address_place)(48 + log2Up(block_size + 1) - 1, 48) // TODO magic numbers
   val d_cols_default = rs1s(preload_cmd_place)(32 + log2Up(block_size + 1) - 1, 32) // TODO magic numbers
@@ -165,8 +181,8 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
   val b_rows = Mux(current_dataflow === Dataflow.OS.id.U && bd_transpose, b_cols_default, b_rows_default)
   val d_cols = Mux(current_dataflow === Dataflow.WS.id.U && bd_transpose, d_rows_default, d_cols_default)
   val d_rows = Mux(current_dataflow === Dataflow.WS.id.U && bd_transpose, d_cols_default, d_rows_default)
-  val c_cols = rs2s(preload_cmd_place)(32 + log2Up(block_size + 1) - 1, 32) // TODO magic numbers
-  val c_rows = rs2s(preload_cmd_place)(48 + log2Up(block_size + 1) - 1, 48) // TODO magic numbers
+  val c_cols = rs2s(preload_cmd_place)(32 + 11 - 1, 32) // TODO magic numbers
+  val c_rows = rs2s(preload_cmd_place)(48 + 11 - 1, 48) // TODO magic numbers
 
   // Dependency stuff
   io.completed.valid := false.B
@@ -190,11 +206,14 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
   mesh.io.a.valid := false.B
   mesh.io.b.valid := false.B
   mesh.io.d.valid := false.B
+  mesh.io.depthwise_accum.valid := false.B
+  mesh.io.is_dwconv_depthwise := is_dwconv_depthwise
   mesh.io.req.valid := control_state === flush
 
   mesh.io.a.bits := DontCare
   mesh.io.b.bits := DontCare
   mesh.io.d.bits := DontCare
+  mesh.io.depthwise_accum.bits := DontCare
   mesh.io.req.bits.tag := DontCare
   mesh.io.req.bits.tag.cols := cntl.c_cols
   mesh.io.req.bits.tag.rows := cntl.c_rows
@@ -202,6 +221,7 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
   mesh.io.req.bits.pe_control.propagate := Mux(control_state === flush, in_prop_flush, cntl.prop)
   mesh.io.req.bits.pe_control.dataflow := cntl.dataflow
   mesh.io.req.bits.pe_control.shift := cntl.shift
+  mesh.io.req.bits.pe_control.dwconv_depthwise := is_dwconv_depthwise
   mesh.io.req.bits.a_transpose := cntl.a_transpose
   mesh.io.req.bits.bd_transpose := cntl.bd_transpose
   mesh.io.req.bits.tag.rob_id := cntl.rob_id
@@ -234,9 +254,14 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
 
   // SRAM scratchpad
   // Fire counters which resolve same-bank accesses
-  val a_fire_counter = Reg(UInt(log2Up(block_size).W))
-  val b_fire_counter = Reg(UInt(log2Up(block_size).W))
-  val d_fire_counter = Reg(UInt(log2Up(block_size).W))
+  val a_fire_counter = Reg(UInt(11.W)) //now, channel is used as input dimension
+  val b_fire_counter = Reg(UInt(11.W))
+  val d_fire_counter = Reg(UInt(11.W))
+
+  val frame_h_pos = Reg(UInt(13.W)) //can be shrinked
+  val frame_v_pos = Reg(UInt(13.W)) //can be shrinked
+  val dw_phase = RegInit(false.B)
+  val dw_input_address_offset = Reg(UInt(13.W))
 
   val a_fire_started = RegInit(false.B)
   val d_fire_started = RegInit(false.B)
@@ -248,8 +273,7 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
 
   // "C" stride variables
   val c_addr_stride = Reg(UInt(16.W)) // TODO magic numbers
-
-  val a_address = a_address_rs1 + a_addr_offset
+  val a_address = Mux(is_dwconv_depthwise, a_address_rs1 + dw_input_address_offset, a_address_rs1 + a_addr_offset)
   val b_address = b_address_rs2 + b_fire_counter
   val d_address = d_address_rs1 + (block_size.U - 1.U - d_fire_counter)
 
@@ -372,6 +396,28 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
     a_fire_started := true.B
   }
 
+  when(a_fire){
+    when((a_fire_counter === total_rows - 2.U) && firing && !start_inputting_a){
+      frame_h_pos := 0.U
+      frame_v_pos := 0.U
+      dw_phase := false.B
+      dw_input_address_offset := 0.U
+    }.otherwise{
+      when(dw_phase === false.B){ // dw_phase is false
+        dw_phase := true.B
+        frame_v_pos := frame_v_pos + 1.U
+        dw_input_address_offset := frame_h_pos +& (frame_v_pos * dw_icols) //original : 4.U, a_rows
+      }.elsewhen(dw_phase === true.B){
+        dw_phase := false.B
+        dw_input_address_offset := dw_input_address_offset + dw_input_phase_offset
+        when(frame_v_pos === dw_frame_height){
+          frame_h_pos := frame_h_pos + 1.U
+          frame_v_pos := 0.U
+        }
+      }
+    }
+  }
+  
   when (!firing) {
     b_fire_counter := 0.U
   }.elsewhen (firing && b_fire && cntl_ready) {
@@ -563,15 +609,42 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
             c_addr_stride := config_ex_rs2.c_stride // TODO this needs to be kept in sync with ROB.scala
             config_initialized := true.B
           }.otherwise { // config_cmd_type === CONFIG_IM2COL
-            ocol := cmd.bits(0).cmd.rs2(63, 56)
-            kdim2 := cmd.bits(0).cmd.rs2(55, 48) //increased bitwidth
-            krow := cmd.bits(0).cmd.rs2(47, 44) //increased bitwidth
-            channel := cmd.bits(0).cmd.rs2(31, 23)
-            weight_stride := cmd.bits(0).cmd.rs2(22, 20)
-            weight_double_bank := cmd.bits(0).cmd.rs1(58) //added
-            weight_triple_bank := cmd.bits(0).cmd.rs1(59)
-            row_left := cmd.bits(0).cmd.rs1(57, 54)
-            row_turn := cmd.bits(0).cmd.rs1(53, 42)
+            val config_dwconv_rs1 = rs1s(0).asTypeOf(new ConfigDWConvRs1)
+            
+            when( config_dwconv_rs1.is_dwconv_depthwise  === 1.U) {
+              val config_dwconv_rs2 = rs2s(0).asTypeOf(new ConfigDWConvRs2)
+              is_dwconv_depthwise := true.B
+              dw_ocols := config_dwconv_rs1.ocols
+              dw_orows := config_dwconv_rs1.orows
+              dw_icols := config_dwconv_rs1.icols
+              dw_irows := config_dwconv_rs1.irows
+              dw_atomic_orows := config_dwconv_rs1.atomic_orows
+              dw_ch_blk_num := config_dwconv_rs1.ch_blk_num
+              dw_frame_height := config_dwconv_rs2.frame_height
+              dw_frame_size := config_dwconv_rs2.frame_size
+              dw_atomic_orows_phase_total := config_dwconv_rs2.dw_atomic_orows_phase_total
+
+              //Delayed cycles for the first valid output element for DWConv:
+              //  For normal WS type conv, let's assume the latency for 1x1 systolic array is L
+              //  If we have a DIMxDIM systolic array, the output latency will be L + (DIM-1)
+              //  For DWConv, if the frame size is F, the output latency will be L + 2*(F-1)
+              //  That's why we added 13 cycles of latency for 16x16 systolic array when F = 15
+              dw_latency := 2.U * (config_dwconv_rs2.frame_size - 1.U)  - (block_size.U - 1.U)
+
+              //This phase offsets assume batch processing - needs to be changed
+              dw_input_phase_offset := config_dwconv_rs1.icols * config_dwconv_rs1.atomic_orows * a_addr_stride
+              dw_output_phase_offset := config_dwconv_rs1.atomic_orows
+            }.otherwise {             
+              ocol := cmd.bits(0).cmd.rs2(63, 56)
+              kdim2 := cmd.bits(0).cmd.rs2(55, 48) //increased bitwidth
+              krow := cmd.bits(0).cmd.rs2(47, 44) //increased bitwidth
+              channel := cmd.bits(0).cmd.rs2(31, 23)
+              weight_stride := cmd.bits(0).cmd.rs2(22, 20)
+              weight_double_bank := cmd.bits(0).cmd.rs1(58) //added
+              weight_triple_bank := cmd.bits(0).cmd.rs1(59)
+              row_left := cmd.bits(0).cmd.rs1(57, 54)
+              row_turn := cmd.bits(0).cmd.rs1(53, 42)
+            }
           }
 
           io.completed := cmd.bits(0).rob_id
@@ -722,18 +795,18 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
     val b_fire = Bool()
     val d_fire = Bool()
 
-    val a_unpadded_cols = UInt(log2Up(block_size + 1).W)
+    val a_unpadded_cols = UInt(11.W)
     val b_unpadded_cols = UInt(log2Up(block_size + 1).W)
     val d_unpadded_cols = UInt(log2Up(block_size + 1).W)
 
     val c_addr = local_addr_t.cloneType
-    val c_rows = UInt(log2Up(block_size + 1).W)
-    val c_cols = UInt(log2Up(block_size + 1).W)
+    val c_rows = UInt(11.W)
+    val c_cols = UInt(11.W)
 
     val a_transpose = Bool()
     val bd_transpose = Bool()
 
-    val total_rows = UInt(log2Up(block_size + 1).W)
+    val total_rows = UInt(11.W)
 
     val rob_id = UDValid(UInt(log2Up(reservation_station_entries).W))
 
@@ -874,8 +947,10 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
     mesh.io.a.valid := cntl.a_fire && dataA_valid
     mesh.io.b.valid := cntl.b_fire && dataB_valid
     mesh.io.d.valid := cntl.d_fire && dataD_valid
-
+    mesh.io.is_dwconv_depthwise := is_dwconv_depthwise
     mesh.io.a.bits := dataA.asTypeOf(Vec(meshRows, Vec(tileRows, inputType)))
+      
+    mesh.io.depthwise_accum.bits := (0.S).asTypeOf(Vec(meshRows, Vec(tileRows, accType)))
     mesh.io.b.bits := dataB.asTypeOf(Vec(meshColumns, Vec(tileColumns, inputType)))
     mesh.io.d.bits := dataD.asTypeOf(Vec(meshColumns, Vec(tileColumns, inputType)))
 
@@ -888,37 +963,83 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
 
   when (cntl_valid && cntl.perform_single_preload) {
     mesh.io.a.bits := Mux(a_should_be_fed_into_transposer, dataA.asUInt, 0.U).asTypeOf(Vec(meshRows, Vec(tileRows, inputType)))
+    mesh.io.is_dwconv_depthwise := is_dwconv_depthwise
+
+    mesh.io.depthwise_accum.bits := (0.S).asTypeOf(Vec(meshRows, Vec(tileRows, accType)))
     mesh.io.b.bits := Mux(b_should_be_fed_into_transposer, dataB.asUInt, 0.U).asTypeOf(Vec(meshColumns, Vec(tileColumns, inputType)))
   }
 
   when (cntl_valid && cntl.perform_single_mul) {
     mesh.io.a.bits := Mux(a_should_be_fed_into_transposer, 0.U, dataA.asUInt).asTypeOf(Vec(meshRows, Vec(tileRows, inputType)))
+    mesh.io.is_dwconv_depthwise := is_dwconv_depthwise
+        
+    mesh.io.depthwise_accum.bits := (0.S).asTypeOf(Vec(meshRows, Vec(tileRows, accType)))
     mesh.io.b.bits := Mux(b_should_be_fed_into_transposer, 0.U, dataB.asUInt).asTypeOf(Vec(meshColumns, Vec(tileColumns, inputType)))
     mesh.io.req.bits.tag.addr.make_this_garbage()
   }
 
   // Scratchpad writes
   // val output_counter = new Counter(block_size)
-  val output_counter = RegInit(0.U(log2Up(block_size).W))
+  val output_counter = RegInit(0.U(11.W))
+
+  val dw_valid_output_counter = RegInit(0.U(10.W))  
+  val dw_output_counter_phase0 = RegInit(0.U(10.W)) 
+  val dw_output_counter_phase1 = RegInit(0.U(10.W)) 
+  val dw_w_address_offset = RegInit(0.U(12.W))
+  val dw_w_address_offset_phase0 = RegInit(0.U(12.W))
+  val dw_orow_index = RegInit(0.U(9.W))
+  val dw_ocol_index = RegInit(0.U(9.W))
+
+  val dw_output_phase = dw_valid_output_counter % 2.U
+
 
   val w_total_output_rows = mesh.io.resp.bits.total_rows
 
-  val w_address = Mux(current_dataflow === Dataflow.WS.id.U, mesh.io.resp.bits.tag.addr + output_counter * c_addr_stride,
-    mesh.io.resp.bits.tag.addr + (w_total_output_rows - 1.U - output_counter * c_addr_stride))
+  val w_address = Mux(current_dataflow === Dataflow.WS.id.U, Mux(is_dwconv_depthwise, mesh.io.resp.bits.tag.addr + dw_w_address_offset * c_addr_stride, //
+                                                                                    mesh.io.resp.bits.tag.addr + output_counter * c_addr_stride)
+                                                            ,mesh.io.resp.bits.tag.addr + (w_total_output_rows - 1.U - output_counter * c_addr_stride))
   val write_to_acc = w_address.is_acc_addr
 
   val w_bank = Mux(write_to_acc, w_address.acc_bank(), w_address.sp_bank())
-  val w_row = Mux(write_to_acc, w_address.acc_row(), w_address.sp_row())
+  val w_row = Mux(write_to_acc, w_address.acc_row(), w_address.sp_row()) 
 
   val is_garbage_addr = mesh.io.resp.bits.tag.addr.is_garbage()
 
   val w_matrix_rows = mesh.io.resp.bits.tag.rows
   val w_matrix_cols = mesh.io.resp.bits.tag.cols
 
-  val write_this_row = Mux(current_dataflow === Dataflow.WS.id.U, output_counter < w_matrix_rows,
-    w_total_output_rows - 1.U - output_counter < w_matrix_rows)
+  val write_this_row = Mux(current_dataflow === Dataflow.WS.id.U, 
+                            Mux( is_dwconv_depthwise, Mux(dw_output_phase === 0.U, dw_orow_index/2.U < dw_atomic_orows_phase_total, dw_orow_index/2.U + dw_atomic_orows < dw_atomic_orows_phase_total ),
+                                  output_counter < w_matrix_rows),
+                            w_total_output_rows - 1.U - output_counter < w_matrix_rows)
+
   val w_mask = (0 until block_size).map(_.U < w_matrix_cols) // This is an element-wise mask, rather than a byte-wise mask
 
+  val dw_output_row_index = RegInit(0.U(10.W))
+  val dw_vertical_stride_counter = RegInit(0.U(10.W))
+  val dw_valid_output_started = RegInit(false.B)
+
+  when(! start_array_outputting ){ 
+    dw_output_row_index :=0.U
+    dw_vertical_stride_counter := 0.U
+    dw_valid_output_started := false.B
+  }.otherwise {
+    when (output_counter === dw_latency - 1.U) {
+      dw_valid_output_started := true.B
+    }    
+    when (dw_valid_output_started) {
+      dw_output_row_index := wrappingAdd(dw_output_row_index, 1.U, 2.U*dw_frame_height*a_addr_stride)
+      dw_vertical_stride_counter := wrappingAdd(dw_vertical_stride_counter, 1.U, 2.U*a_addr_stride)
+    }
+  }
+  dontTouch(dw_output_row_index)
+  dontTouch(dw_vertical_stride_counter)                                                                                                           //krow
+  val dw_output_vertical_valid =( ((dw_vertical_stride_counter === 0.U || dw_vertical_stride_counter === 1.U)  //dw_vertical_stride_counter goes up to vertical_stirde*2. Therefore, dw_vertical_stride_counter is not 0 or 1, the output means the skipped elements
+                                  && (dw_output_row_index < 2.U*dw_atomic_orows*a_addr_stride))  //after dw_output_row_index goes beyond 2.U*atomic_orows*a_addr_stride, the output is not a from a valid convolution window
+                                )
+  val dw_output_horizontal_valid =(output_counter < (2.U*dw_frame_height*a_addr_stride)*(dw_ocols) + dw_latency) //There are "ocol" 2K terms. 
+  val dw_output_valid = dw_output_vertical_valid && dw_output_horizontal_valid && dw_valid_output_started
+  
   // Write to normal scratchpad
   for(i <- 0 until sp_banks) {
     val activated_wdata = VecInit(mesh.io.resp.bits.data.map(v => VecInit(v.map { e =>
@@ -946,7 +1067,8 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
   // Write to accumulator
   for (i <- 0 until acc_banks) {
     if (ex_write_to_acc) {
-      io.acc.write(i).valid := start_array_outputting && w_bank === i.U && write_to_acc && !is_garbage_addr && write_this_row
+      io.acc.write(i).valid := Mux(is_dwconv_depthwise   ,(start_array_outputting && w_bank === i.U && write_to_acc && !is_garbage_addr && write_this_row) && dw_output_valid
+                                                       ,(start_array_outputting && w_bank === i.U && write_to_acc && !is_garbage_addr && write_this_row) )                       //
       io.acc.write(i).bits.addr := w_row
       io.acc.write(i).bits.data := VecInit(mesh.io.resp.bits.data.map(v => VecInit(v.map(e => e.withWidthOf(accType)))))
       io.acc.write(i).bits.acc := w_address.accumulate
@@ -969,6 +1091,42 @@ class ExecuteController[T <: Data, U <: Data, V <: Data](xLen: Int, tagWidth: In
   //Seah: added for WS accumulator
   when(mesh.io.resp.fire && mesh.io.resp.bits.tag.rob_id.valid) {
     output_counter := wrappingAdd(output_counter, 1.U, w_total_output_rows)
+     
+     when(dw_output_valid){                                                        //
+      dw_valid_output_counter := wrappingAdd(dw_valid_output_counter, 1.U, dw_ocols*dw_atomic_orows*2.U)      // "row_turn/krow" means orow, 2.U means next batch
+      dw_orow_index := wrappingAdd(dw_orow_index, 1.U, dw_atomic_orows*2.U)
+      
+
+      when(dw_output_phase === 0.U)  { 
+        dw_output_counter_phase0 := dw_output_counter_phase0 + 1.U
+
+        dw_w_address_offset_phase0 := dw_w_address_offset_phase0 + 1.U  
+        dw_w_address_offset := dw_w_address_offset + dw_output_phase_offset
+        
+        when(dw_orow_index === dw_atomic_orows*2.U -2.U) {  //if we're going to reach the bottom of the output frame, 
+          dw_ocol_index := wrappingAdd(dw_ocol_index, 1.U, dw_ocols) //incremented 1 output cycle ahead...
+        }
+      }
+
+      when(dw_output_phase === 1.U)  { 
+        dw_output_counter_phase1 := dw_output_counter_phase1 + 1.U
+
+        when(dw_orow_index === dw_atomic_orows*2.U -1.U) {  //if we're at the bottom of the output frame, 
+          dw_w_address_offset := dw_ocol_index * dw_orows
+          dw_w_address_offset_phase0 := dw_ocol_index * dw_orows
+        }.otherwise {
+          dw_w_address_offset := dw_w_address_offset_phase0
+        }
+      }
+      
+      when(dw_valid_output_counter === dw_ocols*dw_atomic_orows*2.U -1.U){ //dw_ocols*dw_atomic_orows*2.U -1.U is the end of the execution.
+        dw_w_address_offset := 0.U
+        dw_w_address_offset_phase0 := 0.U
+        dw_output_counter_phase0 := 0.U
+        dw_output_counter_phase1 := 0.U
+      }
+    }                                                                                 
+
     val last = mesh.io.resp.bits.last
 
     when(last) {

@@ -10,7 +10,7 @@ class CustomGemminiSoCConfig extends Config(
   new chipyard.config.WithL2TLBs(512) ++
 
   new freechips.rocketchip.subsystem.WithInclusiveCache(
-    nBanks = 1,
+    // nBanks = 1,
     nWays = 8,
     capacityKB = 512,
     outerLatencyCycles = 40
