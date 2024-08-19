@@ -14,31 +14,32 @@ import chisel3.experimental._
   * @param meshRows
   * @param meshColumns
   */
-class Mesh[T <: Data : Arithmetic](inputType: T, outputType: T, accType: T,
-                                   df: Dataflow.Value, tree_reduction: Boolean, tile_latency: Int,
-                                   max_simultaneous_matmuls: Int, output_delay: Int,
-                                   val tileRows: Int, val tileColumns: Int,
-                                   val meshRows: Int, val meshColumns: Int) extends Module {
+class Mesh[T <: Data : Arithmetic]( inputType: T, outputType: T, accType: T, df: Dataflow.Value, tree_reduction: Boolean, 
+                                    tile_latency: Int, max_simultaneous_matmuls: Int, output_delay: Int, val tileRows: Int, 
+                                    val tileColumns: Int, val meshRows: Int, val meshColumns: Int) extends Module {
   val io = IO(new Bundle {
-    val in_a = Input(Vec(meshRows, Vec(tileRows, inputType)))
-    val in_depthwise_accum = Input(Vec(meshRows, Vec(tileRows, inputType)))
-    val out_depthwise_accum = Output(Vec(meshRows, Vec(tileRows, outputType)))
-    val in_b = Input(Vec(meshColumns, Vec(tileColumns, inputType)))
-    val in_d = Input(Vec(meshColumns, Vec(tileColumns, inputType)))
-    val in_control = Input(Vec(meshColumns, Vec(tileColumns, new PEControl(accType))))
-    val in_id = Input(Vec(meshColumns, Vec(tileColumns, UInt(log2Up(max_simultaneous_matmuls).W)))) // The unique id of this particular matmul
-    val in_last = Input(Vec(meshColumns, Vec(tileColumns, Bool())))
-    val out_b = Output(Vec(meshColumns, Vec(tileColumns, outputType)))
-    val out_c = Output(Vec(meshColumns, Vec(tileColumns, outputType)))
-    val in_valid = Input(Vec(meshColumns, Vec(tileColumns, Bool())))
-    val out_valid = Output(Vec(meshColumns, Vec(tileColumns, Bool())))
+    val in_a = Input(Vec(meshRows, Vec(tileRows, inputType))) // MeshRows 수 만큼 Vec 항목을 가짐. 각 Vec 항목은 TileRows 수 만큼 inputType을 가짐
+    // =======added for depthwise(BiRD)========
+    val in_depthwise_accum  = Input (Vec(meshRows, Vec(tileRows, inputType)))
+    val out_depthwise_accum = Output(Vec(meshRows, Vec(tileRows, outputType))) 
+    // ========================================
+    val in_b        = Input (Vec(meshColumns, Vec(tileColumns, inputType)))
+    val in_d        = Input (Vec(meshColumns, Vec(tileColumns, inputType)))
+    val in_control  = Input (Vec(meshColumns, Vec(tileColumns, new PEControl(accType))))
+    val in_id       = Input (Vec(meshColumns, Vec(tileColumns, UInt(log2Up(max_simultaneous_matmuls).W)))) //unique id of this particular matmul
+    val in_last     = Input (Vec(meshColumns, Vec(tileColumns, Bool())))
+    val out_b       = Output(Vec(meshColumns, Vec(tileColumns, outputType)))
+    val out_c       = Output(Vec(meshColumns, Vec(tileColumns, outputType)))
+    val in_valid    = Input (Vec(meshColumns, Vec(tileColumns, Bool())))
+    val out_valid   = Output(Vec(meshColumns, Vec(tileColumns, Bool())))
     val out_control = Output(Vec(meshColumns, Vec(tileColumns, new PEControl(accType))))
-    val out_id = Output(Vec(meshColumns, Vec(tileColumns, UInt(log2Up(max_simultaneous_matmuls).W))))
-    val out_last = Output(Vec(meshColumns, Vec(tileColumns, Bool())))
+    val out_id      = Output(Vec(meshColumns, Vec(tileColumns, UInt(log2Up(max_simultaneous_matmuls).W))))
+    val out_last    = Output(Vec(meshColumns, Vec(tileColumns, Bool())))
   })
 
   // mesh(r)(c) => Tile at row r, column c
-  val mesh: Seq[Seq[Tile[T]]] = Seq.fill(meshRows, meshColumns)(Module(new Tile(inputType, outputType, accType, df, tree_reduction, max_simultaneous_matmuls, tileRows, tileColumns)))
+  val mesh: Seq[Seq[Tile[T]]] = Seq.fill(meshRows, meshColumns)
+            (Module(new Tile(inputType, outputType, accType, df, tree_reduction, max_simultaneous_matmuls, tileRows, tileColumns)))
   val meshT = mesh.transpose
 
   def pipe[T <: Data](valid: Bool, t: T, latency: Int): T = {
@@ -57,6 +58,7 @@ class Mesh[T <: Data : Arithmetic](inputType: T, outputType: T, accType: T,
     }
   }
 
+  // =======added for depthwise(BiRD)========
   for (r <- 0 until meshRows) {
     mesh(r).reverse.foldLeft(io.in_depthwise_accum(r)) {
       case (in_depthwise_accum, tile) =>
@@ -64,6 +66,7 @@ class Mesh[T <: Data : Arithmetic](inputType: T, outputType: T, accType: T,
         tile.io.out_depthwise_accum
     }
   }
+  // ========================================
 
   // Chain tile_out_b -> tile_b_in (pipeline b across each column)
   for (c <- 0 until meshColumns) {

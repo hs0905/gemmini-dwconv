@@ -9,19 +9,22 @@ import Util._
 /**
   * A Tile is a purely combinational 2D array of passThrough PEs.
   * a, b, s, and in_propag are broadcast across the entire array and are passed through to the Tile's outputs
-  * @param width The data width of each PE in bits
-  * @param rows Number of PEs on each row
-  * @param columns Number of PEs on each column
+  * @param width    The data width of each PE in bits
+  * @param rows     Number of PEs on each row
+  * @param columns  Number of PEs on each column
   */
-class Tile[T <: Data](inputType: T, outputType: T, accType: T, df: Dataflow.Value, tree_reduction: Boolean, max_simultaneous_matmuls: Int, val rows: Int, val columns: Int)(implicit ev: Arithmetic[T]) extends Module {
+class Tile[T <: Data](inputType: T, outputType: T, accType: T, df: Dataflow.Value, tree_reduction: Boolean, 
+                      max_simultaneous_matmuls: Int, val rows: Int, val columns: Int)(implicit ev: Arithmetic[T]) 
+                      extends Module 
+  {
   val io = IO(new Bundle {
-    val in_a        = Input(Vec(rows, inputType))
-    val in_b        = Input(Vec(columns, outputType)) // This is the output of the tile next to it
-    val in_d        = Input(Vec(columns, outputType))
+    val in_a        = Input(Vec(rows,     inputType))
+    val in_b        = Input(Vec(columns,  outputType)) // This is the output of the tile next to it
+    val in_d        = Input(Vec(columns,  outputType))
 
     val in_control  = Input(Vec(columns, new PEControl(accType)))
     val in_id       = Input(Vec(columns, UInt(log2Up(max_simultaneous_matmuls).W)))
-    val in_last  = Input(Vec(columns, Bool()))
+    val in_last     = Input(Vec(columns, Bool()))
 
     val out_a       = Output(Vec(rows, inputType))
     val out_c       = Output(Vec(columns, outputType))
@@ -31,20 +34,25 @@ class Tile[T <: Data](inputType: T, outputType: T, accType: T, df: Dataflow.Valu
     val out_id      = Output(Vec(columns, UInt(log2Up(max_simultaneous_matmuls).W)))
     val out_last    = Output(Vec(columns, Bool()))
 
-    val in_valid = Input(Vec(columns, Bool()))
-    val out_valid = Output(Vec(columns, Bool()))
+    val in_valid    = Input(Vec(columns, Bool()))
+    val out_valid   = Output(Vec(columns, Bool()))
 
-    val bad_dataflow = Output(Bool())
-    val in_depthwise_accum = Input(Vec(rows,outputType))
-    val out_depthwise_accum = Output(Vec(rows,outputType))
+    val bad_dataflow= Output(Bool())
+    // added for depthwise(BiRD)
+    // ========================================
+    val in_depthwise_accum  = Input(Vec(rows,outputType))  // new path for depthwise accum
+    val out_depthwise_accum = Output(Vec(rows,outputType)) // new path for depthwise accum
+    // ========================================
   })
-
-  dontTouch(io.in_depthwise_accum)
+  // added for depthwise(BiRD)
+  // ========================================
+  dontTouch(io.in_depthwise_accum)  // dontTouch means that the signal is not optimized away
   dontTouch(io.out_depthwise_accum)
+  // ========================================
   import ev._
 
   val tile = Seq.fill(rows, columns)(Module(new PE(inputType, outputType, accType, df, max_simultaneous_matmuls)))
-  val tileT = tile.transpose
+  val tileT = tile.transpose  // Transpose the Tile(array of PEs)
 
   // TODO: abstract hori/vert broadcast, all these connections look the same
   // Broadcast 'a' horizontally across the Tile
@@ -55,7 +63,8 @@ class Tile[T <: Data](inputType: T, outputType: T, accType: T, df: Dataflow.Valu
         pe.io.out_a
     }
   }
-
+  // added for depthwise(BiRD)
+  // ========================================
   for (r <- 0 until rows) {
     tile(r).reverse.foldLeft(io.in_depthwise_accum(r)) {
       case (in_depthwise_accum, pe) =>
@@ -63,6 +72,7 @@ class Tile[T <: Data](inputType: T, outputType: T, accType: T, df: Dataflow.Valu
         pe.io.out_depthwise_accum
     }
   }
+  // ========================================
 
   // Broadcast 'b' vertically across the Tile
   for (c <- 0 until columns) {
@@ -120,26 +130,28 @@ class Tile[T <: Data](inputType: T, outputType: T, accType: T, df: Dataflow.Valu
 
   // Drive the Tile's bottom IO
   for (c <- 0 until columns) {
-    io.out_c(c) := tile(rows-1)(c).io.out_c
+    io.out_c(c)       := tile(rows-1)(c).io.out_c
     io.out_control(c) := tile(rows-1)(c).io.out_control
-    io.out_id(c) := tile(rows-1)(c).io.out_id
-    io.out_last(c) := tile(rows-1)(c).io.out_last
-    io.out_valid(c) := tile(rows-1)(c).io.out_valid
-
-    io.out_b(c) := {
-      if (tree_reduction) {
-        val prods = tileT(c).map(_.io.out_b)
-        accumulateTree(prods :+ io.in_b(c))
-      } else {
-        tile(rows - 1)(c).io.out_b
-      }
-    }
+    io.out_id(c)      := tile(rows-1)(c).io.out_id
+    io.out_last(c)    := tile(rows-1)(c).io.out_last
+    io.out_valid(c)   := tile(rows-1)(c).io.out_valid
+    io.out_b(c)       := {
+                          if (tree_reduction) {
+                              val prods = tileT(c).map(_.io.out_b)
+                              accumulateTree(prods :+ io.in_b(c))
+                            }else {
+                             tile(rows - 1)(c).io.out_b
+                            }
+                          }
   }
   io.bad_dataflow := tile.map(_.map(_.io.bad_dataflow).reduce(_||_)).reduce(_||_)
 
   // Drive the Tile's right IO
   for (r <- 0 until rows) {
     io.out_a(r) := tile(r)(columns-1).io.out_a
+  // added for depthwise(BiRD)
+  // ========================================    
     io.out_depthwise_accum(r) := tile(r)(0).io.out_depthwise_accum
+  // ========================================
   }
 }
